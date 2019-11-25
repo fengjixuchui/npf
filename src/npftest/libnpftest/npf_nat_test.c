@@ -16,7 +16,7 @@
 
 #define	NPF_BINAT	(NPF_NATIN | NPF_NATOUT)
 
-#define	RANDOM_PORT	53472
+#define	RANDOM_PORT	46759
 
 static const struct test_case {
 	const char *	src;
@@ -230,7 +230,7 @@ npf_nat_test(bool verbose)
 		}
 		m = mbuf_get_pkt(t->af, IPPROTO_UDP,
 		    t->src, t->dst, t->sport, t->dport);
-		error = npf_packet_handler(npf, &m, ifp, t->di);
+		error = npfk_packet_handler(npf, &m, ifp, t->di);
 		ret = checkresult(verbose, i, m, ifp, error);
 		if (m) {
 			m_freem(m);

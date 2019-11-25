@@ -107,7 +107,7 @@
 
 #ifdef _KERNEL
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: npf_conn.c,v 1.26 2019/01/19 21:19:31 rmind Exp $");
+__KERNEL_RCSID(0, "$NetBSD$");
 
 #include <sys/param.h>
 #include <sys/types.h>
@@ -149,7 +149,7 @@ static nvlist_t *npf_conn_export(npf_t *, npf_conn_t *);
  */
 
 void
-npf_conn_init(npf_t *npf, int flags)
+npf_conn_init(npf_t *npf)
 {
 	npf->conn_cache[0] = pool_cache_init(
 	    offsetof(npf_conn_t, c_keys[NPF_CONNKEY_V4WORDS * 2]),
@@ -161,10 +161,6 @@ npf_conn_init(npf_t *npf, int flags)
 	mutex_init(&npf->conn_lock, MUTEX_DEFAULT, IPL_NONE);
 	npf->conn_tracking = CONN_TRACKING_OFF;
 	npf->conn_db = npf_conndb_create();
-
-	if ((flags & NPF_NO_GC) == 0) {
-		npf_worker_register(npf, npf_conn_worker);
-	}
 	npf_conndb_sysinit(npf);
 }
 
@@ -204,13 +200,14 @@ npf_conn_load(npf_t *npf, npf_conndb_t *ndb, bool track)
 	mutex_enter(&npf->conn_lock);
 	if (ndb) {
 		KASSERT(npf->conn_tracking == CONN_TRACKING_OFF);
-		odb = npf->conn_db;
-		npf->conn_db = ndb;
+		odb = atomic_load_relaxed(&npf->conn_db);
 		membar_sync();
+		atomic_store_relaxed(&npf->conn_db, ndb);
 	}
 	if (track) {
 		/* After this point lookups start flying in. */
-		npf->conn_tracking = CONN_TRACKING_ON;
+		membar_producer();
+		atomic_store_relaxed(&npf->conn_tracking, CONN_TRACKING_ON);
 	}
 	mutex_exit(&npf->conn_lock);
 
@@ -233,7 +230,8 @@ void
 npf_conn_tracking(npf_t *npf, bool track)
 {
 	KASSERT(npf_config_locked_p(npf));
-	npf->conn_tracking = track ? CONN_TRACKING_ON : CONN_TRACKING_OFF;
+	atomic_store_relaxed(&npf->conn_tracking,
+	    track ? CONN_TRACKING_ON : CONN_TRACKING_OFF);
 }
 
 static inline bool
@@ -245,7 +243,7 @@ npf_conn_trackable_p(const npf_cache_t *npc)
 	 * Check if connection tracking is on.  Also, if layer 3 and 4 are
 	 * not cached - protocol is not supported or packet is invalid.
 	 */
-	if (npf->conn_tracking != CONN_TRACKING_ON) {
+	if (atomic_load_relaxed(&npf->conn_tracking) != CONN_TRACKING_ON) {
 		return false;
 	}
 	if (!npf_iscached(npc, NPC_IP46) || !npf_iscached(npc, NPC_LAYER4)) {
@@ -260,27 +258,40 @@ conn_update_atime(npf_conn_t *con)
 	struct timespec tsnow;
 
 	getnanouptime(&tsnow);
-	con->c_atime = tsnow.tv_sec;
+	atomic_store_relaxed(&con->c_atime, tsnow.tv_sec);
 }
 
 /*
- * npf_conn_ok: check if the connection is active and has the right direction.
+ * npf_conn_check: check that:
+ *
+ *	- the connection is active;
+ *
+ *	- the packet is travelling in the right direction with the respect
+ *	  to the connection direction (if interface-id is not zero);
+ *
+ *	- the packet is travelling on the same interface as the
+ *	  connection interface (if interface-id is not zero).
  */
 static bool
-npf_conn_ok(const npf_conn_t *con, const int di, bool forw)
+npf_conn_check(const npf_conn_t *con, const nbuf_t *nbuf,
+    const unsigned di, const bool forw)
 {
-	const uint32_t flags = con->c_flags;
+	const uint32_t flags = atomic_load_relaxed(&con->c_flags);
+	const unsigned ifid = atomic_load_relaxed(&con->c_ifid);
+	bool active, pforw;
 
-	/* Check if connection is active and not expired. */
-	bool ok = (flags & (CONN_ACTIVE | CONN_EXPIRE)) == CONN_ACTIVE;
-	if (__predict_false(!ok)) {
+	active = (flags & (CONN_ACTIVE | CONN_EXPIRE)) == CONN_ACTIVE;
+	if (__predict_false(!active)) {
 		return false;
 	}
-
-	/* Check if the direction is consistent */
-	bool pforw = (flags & PFIL_ALL) == (unsigned)di;
-	if (__predict_false(forw != pforw)) {
-		return false;
+	if (ifid && nbuf) {
+		pforw = (flags & PFIL_ALL) == (unsigned)di;
+		if (__predict_false(forw != pforw)) {
+			return false;
+		}
+		if (__predict_false(ifid != nbuf->nb_ifid)) {
+			return false;
+		}
 	}
 	return true;
 }
@@ -295,32 +306,23 @@ npf_conn_lookup(const npf_cache_t *npc, const int di, bool *forw)
 {
 	npf_t *npf = npc->npc_ctx;
 	const nbuf_t *nbuf = npc->npc_nbuf;
+	npf_conndb_t *conn_db;
 	npf_conn_t *con;
 	npf_connkey_t key;
-	u_int cifid;
 
 	/* Construct a key and lookup for a connection in the store. */
 	if (!npf_conn_conkey(npc, &key, true)) {
 		return NULL;
 	}
-	con = npf_conndb_lookup(npf->conn_db, &key, forw);
+	conn_db = atomic_load_relaxed(&npf->conn_db);
+	con = npf_conndb_lookup(conn_db, &key, forw);
 	if (con == NULL) {
 		return NULL;
 	}
-	KASSERT(npc->npc_proto == con->c_proto);
+	KASSERT(npc->npc_proto == atomic_load_relaxed(&con->c_proto));
 
-	/* Check if connection is active and not expired. */
-	if (!npf_conn_ok(con, di, *forw)) {
-		atomic_dec_uint(&con->c_refcnt);
-		return NULL;
-	}
-
-	/*
-	 * Match the interface and the direction of the connection entry
-	 * and the packet.
-	 */
-	cifid = con->c_ifid;
-	if (__predict_false(cifid && cifid != nbuf->nb_ifid)) {
+	/* Extra checks for the connection and packet. */
+	if (!npf_conn_check(con, nbuf, di, *forw)) {
 		atomic_dec_uint(&con->c_refcnt);
 		return NULL;
 	}
@@ -379,7 +381,8 @@ npf_conn_inspect(npf_cache_t *npc, const int di, int *error)
 	 * If this is multi-end state, then specially tag the packet
 	 * so it will be just passed-through on other interfaces.
 	 */
-	if (con->c_ifid == 0 && nbuf_add_tag(nbuf, NPF_NTAG_PASS) != 0) {
+	if (atomic_load_relaxed(&con->c_ifid) == 0 &&
+	    nbuf_add_tag(nbuf, NPF_NTAG_PASS) != 0) {
 		npf_conn_release(con);
 		*error = ENOMEM;
 		return NULL;
@@ -394,13 +397,14 @@ npf_conn_inspect(npf_cache_t *npc, const int di, int *error)
  * => Connection will be activated on the first reference release.
  */
 npf_conn_t *
-npf_conn_establish(npf_cache_t *npc, int di, bool per_if)
+npf_conn_establish(npf_cache_t *npc, int di, bool global)
 {
 	npf_t *npf = npc->npc_ctx;
 	const unsigned alen = npc->npc_alen;
 	const unsigned idx = NPF_CONNCACHE(alen);
 	const nbuf_t *nbuf = npc->npc_nbuf;
 	npf_connkey_t *fw, *bk;
+	npf_conndb_t *conn_db;
 	npf_conn_t *con;
 	int error = 0;
 
@@ -427,6 +431,7 @@ npf_conn_establish(npf_cache_t *npc, int di, bool per_if)
 
 	con->c_proto = npc->npc_proto;
 	CTASSERT(sizeof(con->c_proto) >= sizeof(npc->npc_proto));
+	con->c_alen = alen;
 
 	/* Initialize the protocol state. */
 	if (!npf_state_init(npc, &con->c_state)) {
@@ -447,7 +452,7 @@ npf_conn_establish(npf_cache_t *npc, int di, bool per_if)
 		npf_conn_destroy(npf, con);
 		return NULL;
 	}
-	con->c_ifid = per_if ? nbuf->nb_ifid : 0;
+	con->c_ifid = global ? nbuf->nb_ifid : 0;
 
 	/*
 	 * Set last activity time for a new connection and acquire
@@ -462,13 +467,14 @@ npf_conn_establish(npf_cache_t *npc, int di, bool per_if)
 	 * the connection later.
 	 */
 	mutex_enter(&con->c_lock);
-	if (!npf_conndb_insert(npf->conn_db, fw, con, true)) {
+	conn_db = atomic_load_relaxed(&npf->conn_db);
+	if (!npf_conndb_insert(conn_db, fw, con, true)) {
 		error = EISCONN;
 		goto err;
 	}
-	if (!npf_conndb_insert(npf->conn_db, bk, con, false)) {
+	if (!npf_conndb_insert(conn_db, bk, con, false)) {
 		npf_conn_t *ret __diagused;
-		ret = npf_conndb_remove(npf->conn_db, fw);
+		ret = npf_conndb_remove(conn_db, fw);
 		KASSERT(ret == con);
 		error = EISCONN;
 		goto err;
@@ -488,7 +494,7 @@ err:
 	}
 
 	/* Finally, insert into the connection list. */
-	npf_conndb_enqueue(npf->conn_db, con);
+	npf_conndb_enqueue(conn_db, con);
 	mutex_exit(&con->c_lock);
 
 	return error ? NULL : con;
@@ -497,15 +503,13 @@ err:
 void
 npf_conn_destroy(npf_t *npf, npf_conn_t *con)
 {
-	const npf_connkey_t *key = npf_conn_getforwkey(con);
-	const unsigned alen = NPF_CONNKEY_ALEN(key);
-	const unsigned idx __unused = NPF_CONNCACHE(alen);
+	const unsigned idx __unused = NPF_CONNCACHE(con->c_alen);
 
 	KASSERT(con->c_refcnt == 0);
 
 	if (con->c_nat) {
 		/* Release any NAT structures. */
-		npf_nat_destroy(con->c_nat);
+		npf_nat_destroy(con, con->c_nat);
 	}
 	if (con->c_rproc) {
 		/* Release the rule procedure. */
@@ -532,13 +536,14 @@ int
 npf_conn_setnat(const npf_cache_t *npc, npf_conn_t *con,
     npf_nat_t *nt, unsigned ntype)
 {
-	static const u_int nat_type_dimap[] = {
+	static const unsigned nat_type_dimap[] = {
 		[NPF_NATOUT] = NPF_DST,
 		[NPF_NATIN] = NPF_SRC,
 	};
 	npf_t *npf = npc->npc_ctx;
 	npf_connkey_t key, *fw, *bk;
 	npf_conn_t *ret __diagused;
+	npf_conndb_t *conn_db;
 	npf_addr_t *taddr;
 	in_port_t tport;
 
@@ -571,19 +576,20 @@ npf_conn_setnat(const npf_cache_t *npc, npf_conn_t *con,
 	/* Remove the "backwards" key. */
 	fw = npf_conn_getforwkey(con);
 	bk = npf_conn_getbackkey(con, NPF_CONNKEY_ALEN(fw));
-	ret = npf_conndb_remove(npf->conn_db, bk);
+	conn_db = atomic_load_relaxed(&npf->conn_db);
+	ret = npf_conndb_remove(conn_db, bk);
 	KASSERT(ret == con);
 
 	/* Set the source/destination IDs to the translation values. */
 	npf_conn_adjkey(bk, taddr, tport, nat_type_dimap[ntype]);
 
 	/* Finally, re-insert the "backwards" key. */
-	if (!npf_conndb_insert(npf->conn_db, bk, con, false)) {
+	if (!npf_conndb_insert(conn_db, bk, con, false)) {
 		/*
 		 * Race: we have hit the duplicate, remove the "forwards"
 		 * key and expire our connection; it is no longer valid.
 		 */
-		ret = npf_conndb_remove(npf->conn_db, fw);
+		ret = npf_conndb_remove(conn_db, fw);
 		KASSERT(ret == con);
 
 		atomic_or_uint(&con->c_flags, CONN_REMOVED | CONN_EXPIRE);
@@ -615,10 +621,10 @@ npf_conn_expire(npf_conn_t *con)
 bool
 npf_conn_pass(const npf_conn_t *con, npf_match_info_t *mi, npf_rproc_t **rp)
 {
-	KASSERT(con->c_refcnt > 0);
+	KASSERT(atomic_load_relaxed(&con->c_refcnt) > 0);
 	if (__predict_true(con->c_flags & CONN_PASS)) {
-		mi->mi_rid = con->c_rid;
-		mi->mi_retfl = con->c_retfl;
+		mi->mi_rid = atomic_load_relaxed(&con->c_rid);
+		mi->mi_retfl = atomic_load_relaxed(&con->c_retfl);
 		*rp = con->c_rproc;
 		return true;
 	}
@@ -632,8 +638,8 @@ npf_conn_pass(const npf_conn_t *con, npf_match_info_t *mi, npf_rproc_t **rp)
 void
 npf_conn_setpass(npf_conn_t *con, const npf_match_info_t *mi, npf_rproc_t *rp)
 {
-	KASSERT((con->c_flags & CONN_ACTIVE) == 0);
-	KASSERT(con->c_refcnt > 0);
+	KASSERT((atomic_load_relaxed(&con->c_flags) & CONN_ACTIVE) == 0);
+	KASSERT(atomic_load_relaxed(&con->c_refcnt) > 0);
 	KASSERT(con->c_rproc == NULL);
 
 	/*
@@ -656,11 +662,13 @@ npf_conn_setpass(npf_conn_t *con, const npf_match_info_t *mi, npf_rproc_t *rp)
 void
 npf_conn_release(npf_conn_t *con)
 {
-	if ((con->c_flags & (CONN_ACTIVE | CONN_EXPIRE)) == 0) {
+	const unsigned flags = atomic_load_relaxed(&con->c_flags);
+
+	if ((flags & (CONN_ACTIVE | CONN_EXPIRE)) == 0) {
 		/* Activate: after this, connection is globally visible. */
 		atomic_or_uint(&con->c_flags, CONN_ACTIVE);
 	}
-	KASSERT(con->c_refcnt > 0);
+	KASSERT(atomic_load_relaxed(&con->c_refcnt) > 0);
 	atomic_dec_uint(&con->c_refcnt);
 }
 
@@ -671,8 +679,10 @@ npf_conn_release(npf_conn_t *con)
 npf_nat_t *
 npf_conn_getnat(npf_conn_t *con, const int di, bool *forw)
 {
-	KASSERT(con->c_refcnt > 0);
-	*forw = (con->c_flags & PFIL_ALL) == (u_int)di;
+	const unsigned flags = atomic_load_relaxed(&con->c_flags);
+
+	KASSERT(atomic_load_relaxed(&con->c_refcnt) > 0);
+	*forw = (flags & PFIL_ALL) == (unsigned)di;
 	return con->c_nat;
 }
 
@@ -682,10 +692,11 @@ npf_conn_getnat(npf_conn_t *con, const int di, bool *forw)
 bool
 npf_conn_expired(npf_t *npf, const npf_conn_t *con, uint64_t tsnow)
 {
+	const unsigned flags = atomic_load_relaxed(&con->c_flags);
 	const int etime = npf_state_etime(npf, &con->c_state, con->c_proto);
 	int elapsed;
 
-	if (__predict_false(con->c_flags & CONN_EXPIRE)) {
+	if (__predict_false(flags & CONN_EXPIRE)) {
 		/* Explicitly marked to be expired. */
 		return true;
 	}
@@ -694,7 +705,7 @@ npf_conn_expired(npf_t *npf, const npf_conn_t *con, uint64_t tsnow)
 	 * Note: another thread may update 'atime' and it might
 	 * become greater than 'now'.
 	 */
-	elapsed = (int64_t)tsnow - con->c_atime;
+	elapsed = (int64_t)tsnow - atomic_load_relaxed(&con->c_atime);
 	return elapsed > etime;
 }
 
@@ -730,7 +741,8 @@ npf_conn_remove(npf_conndb_t *cd, npf_conn_t *con)
 void
 npf_conn_worker(npf_t *npf)
 {
-	npf_conndb_gc(npf, npf->conn_db, false, true);
+	npf_conndb_t *conn_db = atomic_load_relaxed(&npf->conn_db);
+	npf_conndb_gc(npf, conn_db, false, true);
 }
 
 /*
@@ -741,17 +753,19 @@ int
 npf_conndb_export(npf_t *npf, nvlist_t *npf_dict)
 {
 	npf_conn_t *head, *con;
+	npf_conndb_t *conn_db;
 
 	/*
 	 * Note: acquire conn_lock to prevent from the database
 	 * destruction and G/C thread.
 	 */
 	mutex_enter(&npf->conn_lock);
-	if (npf->conn_tracking != CONN_TRACKING_ON) {
+	if (atomic_load_relaxed(&npf->conn_tracking) != CONN_TRACKING_ON) {
 		mutex_exit(&npf->conn_lock);
 		return 0;
 	}
-	head = npf_conndb_getlist(npf->conn_db);
+	conn_db = atomic_load_relaxed(&npf->conn_db);
+	head = npf_conndb_getlist(conn_db);
 	con = head;
 	while (con) {
 		nvlist_t *cdict;
@@ -760,7 +774,7 @@ npf_conndb_export(npf_t *npf, nvlist_t *npf_dict)
 			nvlist_append_nvlist_array(npf_dict, "conn-list", cdict);
 			nvlist_destroy(cdict);
 		}
-		if ((con = npf_conndb_getnext(npf->conn_db, con)) == head) {
+		if ((con = npf_conndb_getnext(conn_db, con)) == head) {
 			break;
 		}
 	}
@@ -776,22 +790,25 @@ npf_conn_export(npf_t *npf, npf_conn_t *con)
 {
 	nvlist_t *cdict, *kdict;
 	npf_connkey_t *fw, *bk;
-	unsigned alen;
+	unsigned flags, alen;
 
-	if ((con->c_flags & (CONN_ACTIVE|CONN_EXPIRE)) != CONN_ACTIVE) {
+	flags = atomic_load_relaxed(&con->c_flags);
+	if ((flags & (CONN_ACTIVE|CONN_EXPIRE)) != CONN_ACTIVE) {
 		return NULL;
 	}
 	cdict = nvlist_create(0);
-	nvlist_add_number(cdict, "flags", con->c_flags);
+	nvlist_add_number(cdict, "flags", flags);
 	nvlist_add_number(cdict, "proto", con->c_proto);
 	if (con->c_ifid) {
-		const char *ifname = npf_ifmap_getname(npf, con->c_ifid);
+		char ifname[IFNAMSIZ];
+		npf_ifmap_copyname(npf, con->c_ifid, ifname, sizeof(ifname));
 		nvlist_add_string(cdict, "ifname", ifname);
 	}
 	nvlist_add_binary(cdict, "state", &con->c_state, sizeof(npf_state_t));
 
 	fw = npf_conn_getforwkey(con);
 	alen = NPF_CONNKEY_ALEN(fw);
+	KASSERT(alen == con->c_alen);
 	bk = npf_conn_getbackkey(con, alen);
 
 	kdict = npf_connkey_export(fw);
@@ -900,8 +917,9 @@ int
 npf_conn_find(npf_t *npf, const nvlist_t *idict, nvlist_t **odict)
 {
 	const nvlist_t *kdict;
-	npf_connkey_t key;
+	npf_conndb_t *conn_db;
 	npf_conn_t *con;
+	npf_connkey_t key;
 	uint16_t dir;
 	bool forw;
 
@@ -909,12 +927,13 @@ npf_conn_find(npf_t *npf, const nvlist_t *idict, nvlist_t **odict)
 	if (!kdict || !npf_connkey_import(kdict, &key)) {
 		return EINVAL;
 	}
-	con = npf_conndb_lookup(npf->conn_db, &key, &forw);
+	conn_db = atomic_load_relaxed(&npf->conn_db);
+	con = npf_conndb_lookup(conn_db, &key, &forw);
 	if (con == NULL) {
 		return ESRCH;
 	}
 	dir = dnvlist_get_number(idict, "direction", 0);
-	if (!npf_conn_ok(con, dir, true)) {
+	if (!npf_conn_check(con, NULL, dir, true)) {
 		atomic_dec_uint(&con->c_refcnt);
 		return ESRCH;
 	}
@@ -930,12 +949,13 @@ npf_conn_print(npf_conn_t *con)
 {
 	const npf_connkey_t *fw = npf_conn_getforwkey(con);
 	const npf_connkey_t *bk = npf_conn_getbackkey(con, NPF_CONNKEY_ALEN(fw));
+	const unsigned flags = atomic_load_relaxed(&con->c_flags);
 	const unsigned proto = con->c_proto;
 	struct timespec tspnow;
 
 	getnanouptime(&tspnow);
 	printf("%p:\n\tproto %d flags 0x%x tsdiff %ld etime %d\n", con,
-	    proto, con->c_flags, (long)(tspnow.tv_sec - con->c_atime),
+	    proto, flags, (long)(tspnow.tv_sec - con->c_atime),
 	    npf_state_etime(npf_getkernctx(), &con->c_state, proto));
 	npf_connkey_print(fw);
 	npf_connkey_print(bk);

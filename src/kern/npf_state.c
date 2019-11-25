@@ -33,7 +33,7 @@
 
 #ifdef _KERNEL
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: npf_state.c,v 1.21 2018/10/29 15:37:06 christos Exp $");
+__KERNEL_RCSID(0, "$NetBSD: npf_state.c,v 1.22 2019/07/23 00:52:01 rmind Exp $");
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -58,6 +58,7 @@ __KERNEL_RCSID(0, "$NetBSD: npf_state.c,v 1.21 2018/10/29 15:37:06 christos Exp 
  */
 typedef struct {
 	int		timeouts[NPF_ANY_CONN_NSTATES];
+	int		gre_timeout;
 } npf_state_params_t;
 
 /*
@@ -90,8 +91,8 @@ static void (*npf_state_sample)(npf_state_t *, bool) = NULL;
 void
 npf_state_sysinit(npf_t *npf)
 {
-	const size_t len = sizeof(npf_state_params_t);
-	npf_state_params_t *params = kmem_zalloc(len, KM_SLEEP);
+	npf_state_params_t *params = npf_param_allocgroup(npf,
+	    NPF_PARAMS_GENERIC_STATE, sizeof(npf_state_params_t));
 	npf_param_t param_map[] = {
 		/*
 		 * Generic timeout (in seconds).
@@ -114,9 +115,16 @@ npf_state_sysinit(npf_t *npf)
 			.default_val = 60,
 			.min = 0, .max = INT_MAX
 		},
+#ifdef PPTP_ALG
+		{
+			"state.generic.timeout.gre",
+			&params->gre_timeout,
+			.default_val = 24 * 60 * 60,
+			.min = 0, .max = INT_MAX
+		},
+#endif
 	};
 	npf_param_register(npf, param_map, __arraycount(param_map));
-	npf->params[NPF_PARAMS_GENERIC_STATE] = params;
 	npf_state_tcp_sysinit(npf);
 }
 
@@ -124,7 +132,7 @@ void
 npf_state_sysfini(npf_t *npf)
 {
 	const size_t len = sizeof(npf_state_params_t);
-	kmem_free(npf->params[NPF_PARAMS_GENERIC_STATE], len);
+	npf_param_freegroup(npf, NPF_PARAMS_GENERIC_STATE, len);
 	npf_state_tcp_sysfini(npf);
 }
 
@@ -153,6 +161,9 @@ npf_state_init(npf_cache_t *npc, npf_state_t *nst)
 		break;
 	case IPPROTO_UDP:
 	case IPPROTO_ICMP:
+#ifdef PPTP_ALG
+	case IPPROTO_GRE:
+#endif
 		/* Generic. */
 		nst->nst_state = npf_generic_fsm[nst->nst_state][NPF_FLOW_FORW];
 		ret = true;
@@ -190,6 +201,9 @@ npf_state_inspect(npf_cache_t *npc, npf_state_t *nst, const bool forw)
 		break;
 	case IPPROTO_UDP:
 	case IPPROTO_ICMP:
+#ifdef PPTP_ALG
+	case IPPROTO_GRE:
+#endif
 		/* Generic. */
 		nst->nst_state = npf_generic_fsm[nst->nst_state][di];
 		ret = true;
@@ -203,7 +217,7 @@ npf_state_inspect(npf_cache_t *npc, npf_state_t *nst, const bool forw)
 }
 
 /*
- * npf_state_etime: return connection expiration time according to the state.
+ * npf_state_etime: return the expiration time depending on the state.
  */
 int
 npf_state_etime(npf_t *npf, const npf_state_t *nst, const int proto)
@@ -223,6 +237,12 @@ npf_state_etime(npf_t *npf, const npf_state_t *nst, const int proto)
 		params = npf->params[NPF_PARAMS_GENERIC_STATE];
 		timeout = params->timeouts[state];
 		break;
+#ifdef PPTP_ALG
+	case IPPROTO_GRE:
+		params = npf->params[NPF_PARAMS_GENERIC_STATE];
+		timeout = params->gre_timeout;
+		break;
+#endif
 	default:
 		KASSERT(false);
 	}

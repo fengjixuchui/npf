@@ -29,8 +29,8 @@
 
 /*
  * This file contains wrappers of the kernel interfaces for the
- * standalone version of NPF.  These wrappers use inteded to be portable,
- * using the standard C99 or POSIX interfaces.
+ * standalone version of NPF.  These wrappers use intended to be
+ * portable, using the standard C99 or POSIX interfaces.
  */
 
 #include <sys/cdefs.h>
@@ -110,7 +110,7 @@ npfkern_nvlist_copy(const void *a, const void *b, size_t c)
 #define	mutex_init(l, t, i)	pthread_mutex_init(l, NULL)
 #define	mutex_enter(l)		pthread_mutex_lock(l)
 #define	mutex_exit(l)		pthread_mutex_unlock(l)
-#define	mutex_owned(l)		true
+#define	mutex_owned(l)		((uintptr_t)(l) != (uintptr_t)0)
 #define	mutex_destroy(l)	pthread_mutex_destroy(l)
 
 static inline int
@@ -135,38 +135,6 @@ npfkern_pthread_cond_timedwait(pthread_cond_t *t, pthread_mutex_t *l,
 #define	cv_destroy(c)		pthread_cond_destroy(c)
 
 /*
- * Passive serialization based on EBR.
- */
-typedef ebr_t *			pserialize_t;
-
-static inline void
-npfkern_ebr_wait(ebr_t *ebr)
-{
-	const struct timespec dtime = { 0, 1 * 1000 * 1000 }; /* 1 ms */
-	unsigned epoch, count = SPINLOCK_BACKOFF_MIN;
-
-	while (!ebr_sync(ebr, &epoch)) {
-		if (count < SPINLOCK_BACKOFF_MAX) {
-			SPINLOCK_BACKOFF(count);
-		} else {
-			(void)nanosleep(&dtime, NULL);
-		}
-	}
-}
-
-#define	pserialize_create()	ebr_create()
-#define	pserialize_destroy(p)	ebr_destroy(p)
-#define	pserialize_register(p)	ebr_register(p)
-#define	pserialize_unregister(p) ebr_unregister(p)
-#define	pserialize_perform(p)	npfkern_ebr_wait(p)
-#define	pserialize_read_enter()	NPF_DIAG_MAGIC_VAL
-#ifdef NDEBUG
-#define	pserialize_read_exit(s)	(void)(s);
-#else
-#define	pserialize_read_exit(s)	assert((s) == NPF_DIAG_MAGIC_VAL)
-#endif
-
-/*
  * Atomic operations and memory barriers.
  */
 
@@ -185,15 +153,22 @@ again:
 }
 
 #define	membar_sync()		__sync_synchronize()
+#define	membar_consumer()	__sync_synchronize()
 #define	membar_producer()	__sync_synchronize()
-#define	atomic_inc_uint(x)	__sync_fetch_and_add(x, 1)
-#define	atomic_inc_uint_nv(x)	__sync_add_and_fetch(x, 1)
-#define	atomic_dec_uint(x)	__sync_sub_and_fetch(x, 1)
-#define	atomic_dec_uint_nv(x)	__sync_sub_and_fetch(x, 1)
-#define	atomic_or_uint(x, v)	__sync_fetch_and_or(x, v)
-#define	atomic_cas_32(p, o, n)	__sync_val_compare_and_swap(p, o, n)
-#define	atomic_cas_ptr(p, o, n)	__sync_val_compare_and_swap(p, o, n)
-#define atomic_swap_ptr(x, y)	npfkern_atomic_swap_ptr(x, y)
+#define	atomic_inc_uint(x)	__sync_fetch_and_add((x), 1)
+#define	atomic_inc_uint_nv(x)	__sync_add_and_fetch((x), 1)
+#define	atomic_dec_uint(x)	__sync_sub_and_fetch((x), 1)
+#define	atomic_dec_uint_nv(x)	__sync_sub_and_fetch((x), 1)
+#define	atomic_or_uint(x, v)	__sync_fetch_and_or((x), (v))
+#define	atomic_cas_32(p, o, n)	__sync_val_compare_and_swap((p), (o), (n))
+#define	atomic_cas_64(p, o, n)	__sync_val_compare_and_swap((p), (o), (n))
+#define	atomic_cas_ptr(p, o, n)	__sync_val_compare_and_swap((p), (o), (n))
+#define	atomic_swap_ptr(x, y)	npfkern_atomic_swap_ptr((x), (y))
+
+#define	atomic_load_relaxed(x)		\
+    atomic_load_explicit((x), memory_order_relaxed)
+#define	atomic_store_relaxed(x, y)	\
+    atomic_store_explicit((x), (y), memory_order_relaxed)
 
 /*
  * Threads.
@@ -251,11 +226,11 @@ npfkern_kmem_free(void *ptr, size_t len)
 	free(ptr);
 }
 
-#define	kmem_zalloc(len, flags)		calloc(1, len)
+#define	kmem_zalloc(len, flags)		calloc(1, (len))
 #define	kmem_alloc(len, flags)		malloc(len)
-#define	kmem_free(ptr, len)		npfkern_kmem_free(ptr, len)
-#define	kmem_intr_zalloc(len, flags)	kmem_zalloc(len, flags)
-#define	kmem_intr_free(ptr, len)	kmem_free(ptr, len)
+#define	kmem_free(ptr, len)		npfkern_kmem_free((ptr), (len))
+#define	kmem_intr_zalloc(len, flags)	kmem_zalloc((len), (flags))
+#define	kmem_intr_free(ptr, len)	kmem_free((ptr), (len))
 
 #define	kmalloc(size, type, flags)	calloc(1, (size))
 #define	kfree(ptr, type)		free(ptr)
@@ -410,7 +385,9 @@ npfkern_kpause(const char *wmesg, bool intr, int timo, kmutex_t *mtx)
 #define PFIL_IFADDR	0x00000008
 #define PFIL_IFNET	0x00000010
 
-#define	pfil_head_t	void
+#ifndef PACKET_TAG_NPF
+#define	PACKET_TAG_NPF	10
+#endif
 
 #define	MAX_TCPOPTLEN	40
 
@@ -496,8 +473,6 @@ typedef int modcmd_t;
 #ifndef EPROGMISMATCH
 #define	EPROGMISMATCH		ENOTSUP
 #endif
-
-#define	ffs32(x)		ffs(x)
 
 struct cpu_info { unsigned id; };
 

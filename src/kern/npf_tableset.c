@@ -46,7 +46,7 @@
 
 #ifdef _KERNEL
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: npf_tableset.c,v 1.29 2019/01/19 21:19:32 rmind Exp $");
+__KERNEL_RCSID(0, "$NetBSD$");
 
 #include <sys/param.h>
 #include <sys/types.h>
@@ -199,6 +199,7 @@ npf_tableset_swap(npf_tableset_t *ts, npf_table_t *newt)
 
 	newt->t_refcnt = oldt->t_refcnt;
 	oldt->t_refcnt = 0;
+	membar_producer();
 
 	return atomic_swap_ptr(&ts->ts_map[tid], newt);
 }
@@ -221,10 +222,10 @@ npf_tableset_getbyname(npf_tableset_t *ts, const char *name)
 }
 
 npf_table_t *
-npf_tableset_getbyid(npf_tableset_t *ts, u_int tid)
+npf_tableset_getbyid(npf_tableset_t *ts, unsigned tid)
 {
 	if (__predict_true(tid < ts->ts_nitems)) {
-		return ts->ts_map[tid];
+		return atomic_load_relaxed(&ts->ts_map[tid]);
 	}
 	return NULL;
 }
@@ -405,7 +406,7 @@ npf_table_create(const char *name, u_int tid, int type,
 	default:
 		KASSERT(false);
 	}
-	mutex_init(&t->t_lock, MUTEX_DEFAULT, IPL_NONE);
+	mutex_init(&t->t_lock, MUTEX_DEFAULT, IPL_NET);
 	t->t_type = type;
 	t->t_id = tid;
 	return t;
@@ -456,12 +457,15 @@ npf_table_getid(npf_table_t *t)
  * npf_table_check: validate the name, ID and type.
  */
 int
-npf_table_check(npf_tableset_t *ts, const char *name, uint64_t tid, uint64_t type)
+npf_table_check(npf_tableset_t *ts, const char *name, uint64_t tid,
+    uint64_t type, bool replacing)
 {
+	const npf_table_t *t;
+
 	if (tid >= ts->ts_nitems) {
 		return EINVAL;
 	}
-	if (ts->ts_map[tid] != NULL) {
+	if (!replacing && ts->ts_map[tid] != NULL) {
 		return EEXIST;
 	}
 	switch (type) {
@@ -476,33 +480,15 @@ npf_table_check(npf_tableset_t *ts, const char *name, uint64_t tid, uint64_t typ
 	if (strlen(name) >= NPF_TABLE_MAXNAMELEN) {
 		return ENAMETOOLONG;
 	}
-	if (npf_tableset_getbyname(ts, name)) {
-		return EEXIST;
+	if ((t = npf_tableset_getbyname(ts, name)) != NULL) {
+		if (!replacing || t->t_id != tid) {
+			return EEXIST;
+		}
 	}
 	return 0;
 }
 
 static int
-table_cidr_check(int alen, const npf_addr_t *addr, npf_netmask_t mask)
-{
-	switch (alen) {
-	case sizeof(struct in_addr):
-		if (__predict_false(mask > 32 && mask != NPF_NO_NETMASK)) {
-			return EINVAL;
-		}
-		break;
-	case sizeof(struct in6_addr):
-		if (__predict_false(mask > 128 && mask != NPF_NO_NETMASK)) {
-			return EINVAL;
-		}
-		break;
-	default:
-		return EINVAL;
-	}
-	return 0;
-}
-
-static void
 table_ifaddr_insert(npf_table_t *t, const int alen, npf_tblent_t *ent)
 {
 	const unsigned aidx = NPF_ADDRLEN2IDX(alen);
@@ -520,7 +506,10 @@ table_ifaddr_insert(npf_table_t *t, const int alen, npf_tblent_t *ent)
 		toalloc = roundup2(allocated + 1, NPF_IFADDR_STEP);
 		newsize = toalloc * sizeof(npf_tblent_t *);
 
-		elements = kmem_zalloc(newsize, KM_SLEEP);
+		elements = kmem_zalloc(newsize, KM_NOSLEEP);
+		if (elements == NULL) {
+			return ENOMEM;
+		}
 		for (unsigned i = 0; i < used; i++) {
 			elements[i] = old_elements[i];
 		}
@@ -534,6 +523,7 @@ table_ifaddr_insert(npf_table_t *t, const int alen, npf_tblent_t *ent)
 	}
 	t->t_elements[aidx][used] = ent;
 	t->t_used[aidx]++;
+	return 0;
 }
 
 /*
@@ -546,7 +536,7 @@ npf_table_insert(npf_table_t *t, const int alen,
 	npf_tblent_t *ent;
 	int error;
 
-	error = table_cidr_check(alen, addr, mask);
+	error = npf_netmask_check(alen, mask);
 	if (error) {
 		return error;
 	}
@@ -597,7 +587,9 @@ npf_table_insert(npf_table_t *t, const int alen,
 		error = EINVAL;
 		break;
 	case NPF_TABLE_IFADDR:
-		table_ifaddr_insert(t, alen, ent);
+		if ((error = table_ifaddr_insert(t, alen, ent)) != 0) {
+			break;
+		}
 		LIST_INSERT_HEAD(&t->t_list, ent, te_listent);
 		t->t_nitems++;
 		break;
@@ -622,7 +614,7 @@ npf_table_remove(npf_table_t *t, const int alen,
 	npf_tblent_t *ent = NULL;
 	int error;
 
-	error = table_cidr_check(alen, addr, mask);
+	error = npf_netmask_check(alen, mask);
 	if (error) {
 		return error;
 	}
@@ -679,7 +671,7 @@ npf_table_lookup(npf_table_t *t, const int alen, const npf_addr_t *addr)
 	bool found;
 	int error;
 
-	error = table_cidr_check(alen, addr, NPF_NO_NETMASK);
+	error = npf_netmask_check(alen, NPF_NO_NETMASK);
 	if (error) {
 		return error;
 	}

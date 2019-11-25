@@ -26,7 +26,7 @@
 
 #ifdef _KERNEL
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD$");
+__KERNEL_RCSID(0, "$NetBSD: npf_params.c,v 1.1 2019/07/23 00:52:01 rmind Exp $");
 
 #include <sys/param.h>
 #include <sys/types.h>
@@ -91,6 +91,21 @@ npf_param_fini(npf_t *npf)
 	kmem_free(pinfo, sizeof(npf_paraminfo_t));
 }
 
+void *
+npf_param_allocgroup(npf_t *npf, npf_paramgroup_t group, size_t len)
+{
+	void *params = kmem_zalloc(len, KM_SLEEP);
+	npf->params[group] = params;
+	return params;
+}
+
+void
+npf_param_freegroup(npf_t *npf, npf_paramgroup_t group, size_t len)
+{
+	kmem_free(npf->params[group], len);
+	npf->params[group] = NULL; // diagnostic
+}
+
 /*
  * npf_param_register: register an array of named parameters.
  */
@@ -145,8 +160,22 @@ npf_param_lookup(npf_t *npf, const char *name)
 	return thmap_get(pinfo->map, name, namelen);
 }
 
+int
+npf_param_check(npf_t *npf, const char *name, int val)
+{
+	npf_param_t *param;
+
+	if ((param = npf_param_lookup(npf, name)) == NULL) {
+		return ENOENT;
+	}
+	if (val < param->min || val > param->max) {
+		return EINVAL;
+	}
+	return 0;
+}
+
 __dso_public int
-npf_param_get(npf_t *npf, const char *name, int *val)
+npfk_param_get(npf_t *npf, const char *name, int *val)
 {
 	npf_param_t *param;
 
@@ -158,7 +187,7 @@ npf_param_get(npf_t *npf, const char *name, int *val)
 }
 
 __dso_public int
-npf_param_set(npf_t *npf, const char *name, int val)
+npfk_param_set(npf_t *npf, const char *name, int val)
 {
 	npf_param_t *param;
 

@@ -37,7 +37,7 @@
 #include <sys/param.h>
 #include <sys/types.h>
 
-#define	NPF_VERSION		21
+#define	NPF_VERSION		22
 
 #if defined(_NPF_STANDALONE)
 #include "npf_stand.h"
@@ -142,6 +142,11 @@ int		nbuf_find_tag(nbuf_t *, uint32_t *);
 
 #define	NPC_FMTERR	0x200	/* Format error. */
 
+// #ifdef PPTP_ALG
+#define	NPC_ENHANCED_GRE	0x400	/* Enhanced GRE header */
+#define	NPC_ALG_PPTP_GRE_CTX	0x800	/* PPTP GRE context */
+// #endif
+
 #define	NPC_IP46	(NPC_IP4|NPC_IP6)
 
 typedef struct {
@@ -167,7 +172,7 @@ typedef struct {
 		struct ip6_hdr *	v6;
 	} npc_ip;
 
-	/* TCP, UDP, ICMP. */
+	/* TCP, UDP, ICMP or other protocols. */
 	union {
 		struct tcphdr *		tcp;
 		struct udphdr *		udp;
@@ -203,7 +208,7 @@ bool		npf_autounload_p(void);
 #define	NPF_RULE_RETRST			0x00000010
 #define	NPF_RULE_RETICMP		0x00000020
 #define	NPF_RULE_DYNAMIC		0x00000040
-#define	NPF_RULE_MULTIENDS		0x00000080
+#define	NPF_RULE_GSTATEFUL		0x00000080
 
 #define	NPF_DYNAMIC_GROUP		(NPF_RULE_GROUP | NPF_RULE_DYNAMIC)
 
@@ -253,8 +258,9 @@ bool		npf_autounload_p(void);
 #define	NPF_LAYER_2			2
 #define	NPF_LAYER_3			3
 
-/* XXX mbuf.h: just for now. */
-#define	PACKET_TAG_NPF			10
+/*
+ * Flags passed via nbuf tags.
+ */
 #define	NPF_NTAG_PASS			0x0001
 
 /*
@@ -310,6 +316,7 @@ typedef struct npf_ioctl_table {
 #define	IOC_NPF_SAVE		_IOR('N', 105, nvlist_ref_t)
 #define	IOC_NPF_RULE		_IOWR('N', 107, nvlist_ref_t)
 #define	IOC_NPF_CONN_LOOKUP	_IOWR('N', 108, nvlist_ref_t)
+#define	IOC_NPF_TABLE_REPLACE	_IOWR('N', 109, nvlist_ref_t)
 
 /*
  * NPF error report.
@@ -317,8 +324,9 @@ typedef struct npf_ioctl_table {
 
 typedef struct {
 	int64_t		id;
+	char *		error_msg;
 	char *		source_file;
-	u_int		source_line;
+	unsigned	source_line;
 } npf_error_t;
 
 /*

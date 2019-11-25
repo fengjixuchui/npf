@@ -33,7 +33,7 @@
 
 #ifdef _KERNEL
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: npf_ruleset.c,v 1.47 2018/09/29 14:41:36 rmind Exp $");
+__KERNEL_RCSID(0, "$NetBSD$");
 
 #include <sys/param.h>
 #include <sys/types.h>
@@ -263,17 +263,17 @@ npf_ruleset_add(npf_ruleset_t *rlset, const char *rname, npf_rule_t *rl)
 			it = it->r_next;
 		}
 		if (target) {
-			rl->r_next = target->r_next;
+			atomic_store_relaxed(&rl->r_next, target->r_next);
 			membar_producer();
-			target->r_next = rl;
+			atomic_store_relaxed(&target->r_next, rl);
 			break;
 		}
 		/* FALLTHROUGH */
 
 	case NPF_PRI_FIRST:
-		rl->r_next = rg->r_subset;
+		atomic_store_relaxed(&rl->r_next, rg->r_subset);
 		membar_producer();
-		rg->r_subset = rl;
+		atomic_store_relaxed(&rg->r_subset, rl);
 		break;
 	}
 
@@ -515,7 +515,7 @@ npf_ruleset_reload(npf_t *npf, npf_ruleset_t *newset,
 	}
 
 	/*
-	 * If performing the load of connections then NAT policies may
+	 * If performing the load of connections then NAT policies might
 	 * already have translated connections associated with them and
 	 * we should not share or inherit anything.
 	 */
@@ -523,8 +523,9 @@ npf_ruleset_reload(npf_t *npf, npf_ruleset_t *newset,
 		return;
 
 	/*
-	 * Scan all rules in the new ruleset and share NAT policies.
-	 * Also, assign a unique ID for each policy here.
+	 * Scan all rules in the new ruleset and inherit the active NAT
+	 * policies if they are the same.  Also, assign a unique ID for
+	 * each policy here.
 	 */
 	LIST_FOREACH(rl, &newset->rs_all, r_aentry) {
 		npf_natpolicy_t *np;
@@ -534,13 +535,6 @@ npf_ruleset_reload(npf_t *npf, npf_ruleset_t *newset,
 		if ((np = rl->r_natp) == NULL) {
 			continue;
 		}
-
-		/*
-		 * First, try to share the active port map.  If this
-		 * policy will be unused, npf_nat_freepolicy() will
-		 * drop the reference.
-		 */
-		npf_ruleset_sharepm(oldset, np);
 
 		/* Does it match with any policy in the active ruleset? */
 		LIST_FOREACH(actrl, &oldset->rs_all, r_aentry) {
@@ -575,31 +569,8 @@ npf_ruleset_reload(npf_t *npf, npf_ruleset_t *newset,
 }
 
 /*
- * npf_ruleset_sharepm: attempt to share the active NAT portmap.
+ * npf_ruleset_findnat: find a NAT policy in the ruleset by a given ID.
  */
-npf_rule_t *
-npf_ruleset_sharepm(npf_ruleset_t *rlset, npf_natpolicy_t *mnp)
-{
-	npf_natpolicy_t *np;
-	npf_rule_t *rl;
-
-	/*
-	 * Scan the NAT policies in the ruleset and match with the
-	 * given policy based on the translation IP address.  If they
-	 * match - adjust the given NAT policy to use the active NAT
-	 * portmap.  In such case the reference on the old portmap is
-	 * dropped and acquired on the active one.
-	 */
-	LIST_FOREACH(rl, &rlset->rs_all, r_aentry) {
-		np = rl->r_natp;
-		if (np == NULL || np == mnp)
-			continue;
-		if (npf_nat_sharepm(np, mnp))
-			break;
-	}
-	return rl;
-}
-
 npf_natpolicy_t *
 npf_ruleset_findnat(npf_ruleset_t *rlset, uint64_t id)
 {
@@ -664,7 +635,7 @@ npf_rule_alloc(npf_t *npf, const nvlist_t *rule)
 
 	if (NPF_DYNAMIC_RULE_P(rl->r_attr)) {
 		/* Priority of the dynamic rule. */
-		rl->r_priority = dnvlist_get_number(rule, "prio", 0);
+		rl->r_priority = (int)dnvlist_get_number(rule, "prio", 0);
 	} else {
 		/* The skip-to index.  No need to validate it. */
 		rl->r_skip_to = dnvlist_get_number(rule, "skip-to", 0);
@@ -709,7 +680,8 @@ npf_rule_export(npf_t *npf, const npf_rule_t *rl)
 		nvlist_add_binary(rule, "code", rl->r_code, rl->r_clen);
 	}
 	if (rl->r_ifid) {
-		const char *ifname = npf_ifmap_getname(npf, rl->r_ifid);
+		char ifname[IFNAMSIZ];
+		npf_ifmap_copyname(npf, rl->r_ifid, ifname, sizeof(ifname));
 		nvlist_add_string(rule, "ifname", ifname);
 	}
 	nvlist_add_number(rule, "id", rl->r_id);
@@ -864,13 +836,14 @@ npf_rule_inspect(const npf_rule_t *rl, bpf_args_t *bc_args,
  */
 static inline npf_rule_t *
 npf_rule_reinspect(const npf_rule_t *rg, bpf_args_t *bc_args,
-    const int di_mask, const u_int ifid)
+    const int di_mask, const unsigned ifid)
 {
 	npf_rule_t *final_rl = NULL, *rl;
 
 	KASSERT(NPF_DYNAMIC_GROUP_P(rg->r_attr));
 
-	for (rl = rg->r_subset; rl; rl = rl->r_next) {
+	rl = atomic_load_relaxed(&rg->r_subset);
+	for (; rl; rl = atomic_load_relaxed(&rl->r_next)) {
 		KASSERT(!final_rl || rl->r_priority >= final_rl->r_priority);
 		if (!npf_rule_inspect(rl, bc_args, di_mask, ifid)) {
 			continue;

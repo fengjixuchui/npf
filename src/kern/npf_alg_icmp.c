@@ -33,7 +33,7 @@
 
 #ifdef _KERNEL
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: npf_alg_icmp.c,v 1.31 2018/09/29 14:41:36 rmind Exp $");
+__KERNEL_RCSID(0, "$NetBSD: npf_alg_icmp.c,v 1.32 2019/07/23 00:52:01 rmind Exp $");
 
 #include <sys/param.h>
 #include <sys/module.h>
@@ -453,19 +453,20 @@ err:
  * and module interface.
  */
 
-int
+__dso_public int
 npf_alg_icmp_init(npf_t *npf)
 {
 	static const npfa_funcs_t icmp = {
 		.match		= npfa_icmp_match,
 		.translate	= npfa_icmp_nat,
 		.inspect	= npfa_icmp_conn,
+		.destroy	= NULL,
 	};
 	alg_icmp = npf_alg_register(npf, "icmp", &icmp);
 	return alg_icmp ? 0 : ENOMEM;
 }
 
-int
+__dso_public int
 npf_alg_icmp_fini(npf_t *npf)
 {
 	KASSERT(alg_icmp != NULL);

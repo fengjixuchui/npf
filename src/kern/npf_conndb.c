@@ -32,8 +32,8 @@
  *
  * Warning (not applicable for the userspace npfkern):
  *
- *	The thmap data is partially lock-free data structure that uses its
- *	own spin-locks on the writer side (insert/delete operations).
+ *	thmap is partially lock-free data structure that uses its own
+ *	spin-locks on the writer side (insert/delete operations).
  *
  *	The relevant interrupt priority level (IPL) must be set and the
  *	kernel preemption disabled across the critical paths to prevent
@@ -46,7 +46,7 @@
 
 #ifdef _KERNEL
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: npf_conndb.c,v 1.5 2019/01/19 21:19:31 rmind Exp $");
+__KERNEL_RCSID(0, "$NetBSD$");
 
 #include <sys/param.h>
 #include <sys/types.h>
@@ -93,8 +93,8 @@ typedef struct {
 void
 npf_conndb_sysinit(npf_t *npf)
 {
-	const size_t len = sizeof(npf_conndb_params_t);
-	npf_conndb_params_t *params = kmem_zalloc(len, KM_SLEEP);
+	npf_conndb_params_t *params = npf_param_allocgroup(npf,
+	    NPF_PARAMS_CONNDB, sizeof(npf_conndb_params_t));
 	npf_param_t param_map[] = {
 		{
 			"gc.step",
@@ -104,14 +104,13 @@ npf_conndb_sysinit(npf_t *npf)
 		}
 	};
 	npf_param_register(npf, param_map, __arraycount(param_map));
-	npf->params[NPF_PARAMS_CONNDB] = params;
 }
 
 void
 npf_conndb_sysfini(npf_t *npf)
 {
 	const size_t len = sizeof(npf_conndb_params_t);
-	kmem_free(npf->params[NPF_PARAMS_CONNDB], len);
+	npf_param_freegroup(npf, NPF_PARAMS_CONNDB, len);
 }
 
 npf_conndb_t *
@@ -227,8 +226,8 @@ npf_conndb_enqueue(npf_conndb_t *cd, npf_conn_t *con)
 	npf_conn_t *head;
 
 	do {
-		head = cd->cd_new;
-		con->c_next = head;
+		head = atomic_load_relaxed(&cd->cd_new);
+		atomic_store_relaxed(&con->c_next, head);
 	} while (atomic_cas_ptr(&cd->cd_new, head, con) != head);
 }
 
@@ -244,7 +243,7 @@ npf_conndb_update(npf_conndb_t *cd)
 
 	con = atomic_swap_ptr(&cd->cd_new, NULL);
 	while (con) {
-		npf_conn_t *next = con->c_next; // union
+		npf_conn_t *next = atomic_load_relaxed(&con->c_next); // union
 		LIST_INSERT_HEAD(&cd->cd_list, con, c_entry);
 		con = next;
 	}
@@ -283,6 +282,8 @@ npf_conndb_gc_incr(npf_t *npf, npf_conndb_t *cd, const time_t now)
 	const npf_conndb_params_t *params = npf->params[NPF_PARAMS_CONNDB];
 	unsigned target = params->gc_step;
 	npf_conn_t *con;
+
+	KASSERT(mutex_owned(&npf->conn_lock));
 
 	/*
 	 * Second, start from the "last" (marker) connection.
@@ -397,7 +398,9 @@ npf_conndb_gc(npf_t *npf, npf_conndb_t *cd, bool flush, bool sync)
 		 * Destroy only if removed and no references.  Otherwise,
 		 * just do it next time, unless we are destroying all.
 		 */
-		if (__predict_false(con->c_refcnt)) {
+		const unsigned refcnt = atomic_load_relaxed(&con->c_refcnt);
+
+		if (__predict_false(refcnt)) {
 			if (!flush) {
 				break;
 			}
