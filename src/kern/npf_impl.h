@@ -209,9 +209,12 @@ struct npf {
 	ebr_t *			ebr;
 	npf_config_t *		config;
 
-	/* BPF byte-code context. */
+	/*
+	 * BPF byte-code context, mbuf operations an arbitrary user argument.
+	 */
 	bpf_ctx_t *		bpfctx;
 	const npf_mbufops_t *	mbufops;
+	void *			arg;
 
 	/* Parameters. */
 	npf_paraminfo_t *	paraminfo;
@@ -300,11 +303,7 @@ void		npf_worker_signal(npf_t *);
 void		npf_worker_register(npf_t *, npf_workfunc_t);
 void		npf_worker_unregister(npf_t *, npf_workfunc_t);
 
-int		npfctl_save(npf_t *, u_long, void *);
-int		npfctl_load(npf_t *, u_long, void *);
-int		npfctl_rule(npf_t *, u_long, void *);
-int		npfctl_conn_lookup(npf_t *, u_long, void *);
-int		npfctl_table_replace(npf_t *, u_long, void *);
+int		npfctl_run_op(npf_t *, unsigned, const nvlist_t *, nvlist_t *);
 int		npfctl_table(npf_t *, void *);
 
 void		npf_stats_inc(npf_t *, npf_stats_t);
@@ -414,7 +413,7 @@ int		npf_ruleset_add(npf_ruleset_t *, const char *, npf_rule_t *);
 int		npf_ruleset_remove(npf_ruleset_t *, const char *, uint64_t);
 int		npf_ruleset_remkey(npf_ruleset_t *, const char *,
 		    const void *, size_t);
-nvlist_t *	npf_ruleset_list(npf_t *, npf_ruleset_t *, const char *);
+int		npf_ruleset_list(npf_t *, npf_ruleset_t *, const char *, nvlist_t *);
 int		npf_ruleset_flush(npf_ruleset_t *, const char *);
 void		npf_ruleset_gc(npf_ruleset_t *);
 
@@ -479,10 +478,10 @@ void		npf_portmap_flush(npf_portmap_t *);
 /* NAT. */
 void		npf_nat_sysinit(void);
 void		npf_nat_sysfini(void);
-npf_natpolicy_t *npf_nat_newpolicy(npf_t *, const nvlist_t *, npf_ruleset_t *);
-int		npf_nat_policyexport(const npf_natpolicy_t *, nvlist_t *);
-void		npf_nat_freepolicy(npf_natpolicy_t *);
-bool		npf_nat_cmppolicy(npf_natpolicy_t *, npf_natpolicy_t *);
+npf_natpolicy_t *npf_natpolicy_create(npf_t *, const nvlist_t *, npf_ruleset_t *);
+int		npf_natpolicy_export(const npf_natpolicy_t *, nvlist_t *);
+void		npf_natpolicy_destroy(npf_natpolicy_t *);
+bool		npf_natpolicy_cmp(npf_natpolicy_t *, npf_natpolicy_t *);
 void		npf_nat_setid(npf_natpolicy_t *, uint64_t);
 uint64_t	npf_nat_getid(const npf_natpolicy_t *);
 void		npf_nat_freealg(npf_natpolicy_t *, npf_alg_t *);
@@ -513,12 +512,6 @@ void		npf_alg_exec(npf_cache_t *, npf_nat_t *, bool);
 npf_conn_t *	npf_alg_conn(npf_cache_t *, int);
 int		npf_alg_export(npf_t *, nvlist_t *);
 void		npf_alg_destroy(npf_t *, npf_alg_t *, npf_nat_t *, npf_conn_t *);
-
-// #ifdef PPTP_ALG
-/* PPTP ALG interface */
-void		npf_pptp_conn_conkey(const npf_cache_t *, uint16_t *, bool);
-int		npf_pptp_gre_cache(npf_cache_t *, nbuf_t *, unsigned);
-// #endif
 
 /* Wrappers for the reclamation mechanism. */
 ebr_t *		npf_ebr_create(void);

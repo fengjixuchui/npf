@@ -142,6 +142,12 @@ uint16_t	npfctl_npt66_calcadj(npf_netmask_t, const npf_addr_t *,
 		    const npf_addr_t *);
 int		npfctl_nat_ruleset_p(const char *, bool *);
 
+void		usage(void);
+void		npfctl_rule(int, int, char **);
+void		npfctl_table_replace(int, int, char **);
+void		npfctl_table(int, int, char **);
+int		npfctl_conn_list(int, int, char **);
+
 /*
  * NPF extension loading.
  */
@@ -192,6 +198,7 @@ void		npfctl_bpf_table(npf_bpf_t *, u_int, u_int);
 #define	NPFCTL_NAT_STATIC	2
 
 void		npfctl_config_init(bool);
+void		npfctl_config_build(void);
 int		npfctl_config_send(int);
 nl_config_t *	npfctl_config_ref(void);
 int		npfctl_config_show(int);
@@ -225,11 +232,11 @@ void		npfctl_setparam(const char *, int);
 /*
  * For the systems which do not define TH_ECE and TW_CRW.
  */
-#ifndef TH_ECE
-#define	TH_ECE	  0x40
+#ifndef	TH_ECE
+#define	TH_ECE		0x40
 #endif
-#ifndef TH_CWR
-#define	TH_CWR	  0x80
+#ifndef	TH_CWR
+#define	TH_CWR		0x80
 #endif
 
 #endif
