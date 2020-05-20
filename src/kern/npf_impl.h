@@ -135,8 +135,10 @@ typedef struct {
  * CONNECTION STATE STRUCTURES
  */
 
-#define	NPF_FLOW_FORW		0
-#define	NPF_FLOW_BACK		1
+typedef enum {
+	NPF_FLOW_FORW = 0,
+	NPF_FLOW_BACK = 1,
+} npf_flow_t;
 
 typedef struct {
 	uint32_t	nst_end;
@@ -156,7 +158,7 @@ typedef struct {
 
 typedef struct {
 	bool		(*match)(npf_cache_t *, npf_nat_t *, int);
-	bool		(*translate)(npf_cache_t *, npf_nat_t *, bool);
+	bool		(*translate)(npf_cache_t *, npf_nat_t *, npf_flow_t);
 	npf_conn_t *	(*inspect)(npf_cache_t *, int);
 	void		(*destroy)(npf_t *, npf_nat_t *, npf_conn_t *);
 } npfa_funcs_t;
@@ -193,7 +195,8 @@ typedef struct {
 } npf_param_t;
 
 typedef enum {
-	NPF_PARAMS_CONNDB = 0,
+	NPF_PARAMS_CONN = 0,
+	NPF_PARAMS_CONNDB,
 	NPF_PARAMS_GENERIC_STATE,
 	NPF_PARAMS_TCP_STATE,
 	NPF_PARAMS_COUNT
@@ -454,7 +457,7 @@ void		npf_state_sysinit(npf_t *);
 void		npf_state_sysfini(npf_t *);
 
 bool		npf_state_init(npf_cache_t *, npf_state_t *);
-bool		npf_state_inspect(npf_cache_t *, npf_state_t *, const bool);
+bool		npf_state_inspect(npf_cache_t *, npf_state_t *, npf_flow_t);
 int		npf_state_etime(npf_t *, const npf_state_t *, const int);
 void		npf_state_destroy(npf_state_t *);
 
@@ -486,7 +489,7 @@ void		npf_nat_setid(npf_natpolicy_t *, uint64_t);
 uint64_t	npf_nat_getid(const npf_natpolicy_t *);
 void		npf_nat_freealg(npf_natpolicy_t *, npf_alg_t *);
 
-int		npf_do_nat(npf_cache_t *, npf_conn_t *, const int);
+int		npf_do_nat(npf_cache_t *, npf_conn_t *, const unsigned);
 npf_nat_t *	npf_nat_share_policy(npf_cache_t *, npf_conn_t *, npf_nat_t *);
 void		npf_nat_destroy(npf_conn_t *, npf_nat_t *);
 void		npf_nat_getorig(npf_nat_t *, npf_addr_t **, in_port_t *);
@@ -495,7 +498,7 @@ void		npf_nat_setalg(npf_nat_t *, npf_alg_t *, uintptr_t);
 npf_alg_t *	npf_nat_getalg(const npf_nat_t *);
 uintptr_t	npf_nat_getalgarg(const npf_nat_t *);
 
-void		npf_nat_export(nvlist_t *, npf_nat_t *);
+void		npf_nat_export(npf_t *, const npf_nat_t *, nvlist_t *);
 npf_nat_t *	npf_nat_import(npf_t *, const nvlist_t *, npf_ruleset_t *,
 		    npf_conn_t *);
 
@@ -508,7 +511,7 @@ npf_alg_t *	npf_alg_register(npf_t *, const char *, const npfa_funcs_t *);
 int		npf_alg_unregister(npf_t *, npf_alg_t *);
 npf_alg_t *	npf_alg_construct(npf_t *, const char *);
 bool		npf_alg_match(npf_cache_t *, npf_nat_t *, int);
-void		npf_alg_exec(npf_cache_t *, npf_nat_t *, bool);
+void		npf_alg_exec(npf_cache_t *, npf_nat_t *, const npf_flow_t);
 npf_conn_t *	npf_alg_conn(npf_cache_t *, int);
 int		npf_alg_export(npf_t *, nvlist_t *);
 void		npf_alg_destroy(npf_t *, npf_alg_t *, npf_nat_t *, npf_conn_t *);
