@@ -318,6 +318,7 @@ void		npf_param_register(npf_t *, npf_param_t *, unsigned);
 void *		npf_param_allocgroup(npf_t *, npf_paramgroup_t, size_t);
 void		npf_param_freegroup(npf_t *, npf_paramgroup_t, size_t);
 int		npf_param_check(npf_t *, const char *, int);
+int		npf_params_export(const npf_t *, nvlist_t *);
 
 void		npf_ifmap_init(npf_t *, const npf_ifops_t *);
 void		npf_ifmap_fini(npf_t *);
@@ -463,7 +464,7 @@ void		npf_state_destroy(npf_state_t *);
 
 void		npf_state_tcp_sysinit(npf_t *);
 void		npf_state_tcp_sysfini(npf_t *);
-bool		npf_state_tcp(npf_cache_t *, npf_state_t *, int);
+bool		npf_state_tcp(npf_cache_t *, npf_state_t *, npf_flow_t);
 int		npf_state_tcp_timeout(npf_t *, const npf_state_t *);
 
 /* Portmap. */

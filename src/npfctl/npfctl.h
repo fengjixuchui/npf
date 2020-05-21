@@ -171,7 +171,9 @@ typedef struct npf_bpf npf_bpf_t;
 enum {
 	BM_IPVER, BM_PROTO, BM_SRC_CIDR, BM_SRC_TABLE, BM_DST_CIDR,
 	BM_DST_TABLE, BM_SRC_PORTS, BM_DST_PORTS, BM_TCPFL, BM_ICMP_TYPE,
-	BM_ICMP_CODE,
+	BM_ICMP_CODE, BM_SRC_NEG, BM_DST_NEG,
+
+	BM_COUNT // total number of the marks
 };
 
 npf_bpf_t *	npfctl_bpf_create(void);
@@ -179,14 +181,14 @@ struct bpf_program *npfctl_bpf_complete(npf_bpf_t *);
 const void *	npfctl_bpf_bmarks(npf_bpf_t *, size_t *);
 void		npfctl_bpf_destroy(npf_bpf_t *);
 
-void		npfctl_bpf_group_enter(npf_bpf_t *);
-void		npfctl_bpf_group_exit(npf_bpf_t *, bool);
+void		npfctl_bpf_group_enter(npf_bpf_t *, bool);
+void		npfctl_bpf_group_exit(npf_bpf_t *);
 
 void		npfctl_bpf_proto(npf_bpf_t *, sa_family_t, int);
 void		npfctl_bpf_cidr(npf_bpf_t *, u_int, sa_family_t,
 		    const npf_addr_t *, const npf_netmask_t);
 void		npfctl_bpf_ports(npf_bpf_t *, u_int, in_port_t, in_port_t);
-void		npfctl_bpf_tcpfl(npf_bpf_t *, uint8_t, uint8_t, bool);
+void		npfctl_bpf_tcpfl(npf_bpf_t *, uint8_t, uint8_t);
 void		npfctl_bpf_icmp(npf_bpf_t *, int, int);
 void		npfctl_bpf_table(npf_bpf_t *, u_int, u_int);
 
@@ -204,8 +206,6 @@ nl_config_t *	npfctl_config_ref(void);
 int		npfctl_config_show(int);
 void		npfctl_config_save(nl_config_t *, const char *);
 void		npfctl_config_debug(const char *);
-
-void		npfctl_show_init(void);
 int		npfctl_ruleset_show(int, const char *);
 
 nl_rule_t *	npfctl_rule_ref(void);
