@@ -332,7 +332,7 @@ npf_conn_lookup(const npf_cache_t *npc, const unsigned di, npf_flow_t *flow)
 	npf_connkey_t key;
 
 	/* Construct a key and lookup for a connection in the store. */
-	if (!npf_conn_conkey(npc, &key, NPF_FLOW_FORW)) {
+	if (!npf_conn_conkey(npc, &key, di, NPF_FLOW_FORW)) {
 		return NULL;
 	}
 	con = npf_conndb_lookup(npf, &key, flow);
@@ -472,8 +472,8 @@ npf_conn_establish(npf_cache_t *npc, const unsigned di, bool global)
 	 * Construct "forwards" and "backwards" keys.  Also, set the
 	 * interface ID for this connection (unless it is global).
 	 */
-	if (!npf_conn_conkey(npc, fw, NPF_FLOW_FORW) ||
-	    !npf_conn_conkey(npc, bk, NPF_FLOW_BACK)) {
+	if (!npf_conn_conkey(npc, fw, di, NPF_FLOW_FORW) ||
+	    !npf_conn_conkey(npc, bk, di ^ PFIL_ALL, NPF_FLOW_BACK)) {
 		npf_conn_destroy(npf, con);
 		return NULL;
 	}
@@ -561,14 +561,15 @@ int
 npf_conn_setnat(const npf_cache_t *npc, npf_conn_t *con,
     npf_nat_t *nt, unsigned ntype)
 {
-	static const unsigned nat_type_dimap[] = {
+	static const unsigned nat_type_which[] = {
+		/* See the description in npf_nat_which(). */
 		[NPF_NATOUT] = NPF_DST,
 		[NPF_NATIN] = NPF_SRC,
 	};
 	npf_t *npf = npc->npc_ctx;
-	npf_connkey_t key, *fw, *bk;
 	npf_conn_t *ret __diagused;
 	npf_conndb_t *conn_db;
+	npf_connkey_t *bk;
 	npf_addr_t *taddr;
 	in_port_t tport;
 	uint32_t flags;
@@ -577,11 +578,6 @@ npf_conn_setnat(const npf_cache_t *npc, npf_conn_t *con,
 
 	npf_nat_gettrans(nt, &taddr, &tport);
 	KASSERT(ntype == NPF_NATOUT || ntype == NPF_NATIN);
-
-	/* Construct a "backwards" key. */
-	if (!npf_conn_conkey(npc, &key, NPF_FLOW_BACK)) {
-		return EINVAL;
-	}
 
 	/* Acquire the lock and check for the races. */
 	mutex_enter(&con->c_lock);
@@ -601,14 +597,13 @@ npf_conn_setnat(const npf_cache_t *npc, npf_conn_t *con,
 	}
 
 	/* Remove the "backwards" key. */
-	fw = npf_conn_getforwkey(con);
-	bk = npf_conn_getbackkey(con, NPF_CONNKEY_ALEN(fw));
 	conn_db = atomic_load_relaxed(&npf->conn_db);
+	bk = npf_conn_getbackkey(con, con->c_alen);
 	ret = npf_conndb_remove(conn_db, bk);
 	KASSERT(ret == con);
 
 	/* Set the source/destination IDs to the translation values. */
-	npf_conn_adjkey(bk, taddr, tport, nat_type_dimap[ntype]);
+	npf_conn_adjkey(bk, taddr, tport, nat_type_which[ntype]);
 
 	/* Finally, re-insert the "backwards" key. */
 	if (!npf_conndb_insert(conn_db, bk, con, NPF_FLOW_BACK)) {
@@ -616,6 +611,7 @@ npf_conn_setnat(const npf_cache_t *npc, npf_conn_t *con,
 		 * Race: we have hit the duplicate, remove the "forwards"
 		 * key and expire our connection; it is no longer valid.
 		 */
+		npf_connkey_t *fw = npf_conn_getforwkey(con);
 		ret = npf_conndb_remove(conn_db, fw);
 		KASSERT(ret == con);
 
@@ -653,8 +649,8 @@ npf_conn_pass(const npf_conn_t *con, npf_match_info_t *mi, npf_rproc_t **rp)
 {
 	KASSERT(atomic_load_relaxed(&con->c_refcnt) > 0);
 	if (__predict_true(atomic_load_relaxed(&con->c_flags) & CONN_PASS)) {
-		mi->mi_rid = atomic_load_relaxed(&con->c_rid);
 		mi->mi_retfl = atomic_load_relaxed(&con->c_retfl);
+		mi->mi_rid = con->c_rid;
 		*rp = con->c_rproc;
 		return true;
 	}

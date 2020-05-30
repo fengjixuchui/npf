@@ -222,6 +222,8 @@ struct npf {
 	/* Parameters. */
 	npf_paraminfo_t *	paraminfo;
 	void *			params[NPF_PARAMS_COUNT];
+	int			ip4_reassembly;
+	int			ip6_reassembly;
 
 	/*
 	 * Connection tracking state: disabled (off) or enabled (on).
@@ -251,6 +253,7 @@ struct npf {
 	/* Associated worker information. */
 	unsigned		worker_flags;
 	LIST_ENTRY(npf)		worker_entry;
+	unsigned		worker_wait_time;
 	npf_workfunc_t		worker_funcs[NPF_MAX_WORKS];
 
 	/* Statistics. */
